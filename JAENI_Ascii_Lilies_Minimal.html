@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#000000" />
+<title>For my True Love, Jaeni</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; width:100%; height:100%; overflow:hidden; background:#000; }
+  body { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color:#eee; }
+  .stage { position:fixed; inset:0; overflow:hidden; background:#000; }
+  #garden { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .controls { position:fixed; z-index:5; bottom:24px; left:50%; transform:translateX(-50%); display:flex; align-items:center; justify-content:center; gap:12px; white-space:nowrap; }
+  .density { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid #555; background:#000; }
+  .density label { font-size:11px; letter-spacing:.07em; }
+  .density input { width:100px; accent-color:#ddd; cursor:pointer; }
+  .control { appearance:none; border:1px solid #777; background:#000; color:#eee; padding:11px 17px; font:inherit; font-size:12px; cursor:pointer; }
+  .control:hover, .control:focus-visible { background:#222; outline:none; }
+  @media(max-width:480px) { .controls { bottom:16px; gap:8px; } .density { padding:9px; } .density input { width:75px; } .control { padding:10px 13px; } }
+</style>
+</head>
+<body>
+<main class="stage" aria-label="Animated ASCII lily bouquet spelling JAENI">
+  <canvas id="garden" aria-label="Growing bouquet made of the letters J, A, E, N and I"></canvas>
+</main>
+<div class="controls">
+  <div class="density"><label for="glyphSize">LETTER SIZE</label><input id="glyphSize" aria-label="Letter size" type="range" min="6.8" max="13" step=".6" value="8.6" /></div>
+  <button type="button" class="control" id="replayButton">Replay</button>
+</div>
+<script>
+(() => {
+  'use strict';
+  const W=960, H=1120;
+  const canvas=document.getElementById('garden'), out=canvas.getContext('2d',{alpha:false});
+  const source=document.createElement('canvas'); source.width=W; source.height=H;
+  const s=source.getContext('2d',{willReadFrequently:true});
+  const glyphSize=document.getElementById('glyphSize');
+  let cw=0,ch=0,dpr=1,scale=1,ox=0,oy=0,letterSize=Number(glyphSize.value),motion=true;
+  let origin=performance.now(),pausedAge=0, freeze=false, lastRendered=0, lastUI=-1;
+  const preview=Number(new URLSearchParams(location.search).get('preview')||0);
+  const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(reducedMotion) motion=false;
+
+  const palettes={
+    coral: ['#6d2c36','#b33645','#df5060','#f47775','#ffb59e'],
+    crimson: ['#61252a','#a7313a','#d94a4d','#f16e68','#ffc0a4'],
+    pink: ['#713c63','#b86594','#e797c3','#ffbdd5','#ffe1df'],
+    mauve: ['#5c3549','#a35a7d','#ca82a7','#f1b5c9','#f9d4dc'],
+    ivory: ['#756448','#c5b18c','#e6d4b0','#fff0ce','#fffaf0'],
+    cream: ['#78674b','#cebb96','#ead7ba','#fff0d9','#fffbed'],
+    golden: ['#76511c','#b78725','#d9b544','#f8d95f','#fff5a0'],
+    amber: ['#74502d','#bd834c','#dca572','#efcb94','#ffe4b8'],
+    wine: ['#55252d','#812c39','#b33e52','#c66d78','#e79b98']
+  };
+  // Layering, slight asymmetry and changing bloom times keep it from reading as a flat icon.
+  const flowers=[
+    {x:564,y:172,r:138,kind:'amber', tilt:-.23,start:2.35,seed:2},
+    {x:330,y:265,r:144,kind:'cream',tilt:.44,start:2.8,seed:4},
+    {x:746,y:321,r:140,kind:'golden',tilt:-.23,start:3.2,seed:7},
+    {x:251,y:498,r:147,kind:'golden',tilt:.62,start:3.65,seed:10},
+    {x:727,y:524,r:149,kind:'mauve',tilt:.1,start:4.5,seed:12},
+    {x:509,y:395,r:183,kind:'crimson',tilt:-.12,start:4.05,seed:3},
+    {x:348,y:638,r:181,kind:'pink',tilt:.35,start:4.9,seed:8},
+    {x:656,y:677,r:149,kind:'ivory',tilt:.17,start:5.5,seed:17},
+    {x:269,y:832,r:153,kind:'golden',tilt:.57,start:5.9,seed:22},
+    {x:737,y:835,r:142,kind:'wine',tilt:-.55,start:6.0,seed:13},
+    {x:504,y:858,r:193,kind:'cream',tilt:-.16,start:6.2,seed:19},
+    {x:494,y:666,r:131,kind:'ivory',tilt:.44,start:6.4,seed:25}
+  ];
+  flowers.forEach((f,i)=>{
+    f.i=i; f.stemBase={x:480+(i%4-1.5)*11,y:1096+(i%3)*5};
+    f.cp1={x:f.stemBase.x+(f.x-480)*.23+Math.sin(i*2)*40,y:810+Math.cos(i*7)*55};
+    f.cp2={x:f.x-Math.sin(i*3.1)*70,y:f.y+140+(i%3)*30};
+  });
+  const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
+  const smooth=(a,b,x)=>{const t=clamp((x-a)/(b-a));return t*t*(3-2*t);};
+  const mix=(a,b,t)=>a+(b-a)*t;
+  const bez=(a,b,c,d,t)=>((1-t)**3)*a+3*((1-t)**2)*t*b+3*(1-t)*t*t*c+t**3*d;
+
+  function sizeCanvas(){
+    cw=window.innerWidth;ch=window.innerHeight;dpr=Math.min(window.devicePixelRatio||1,1.6);
+    canvas.width=Math.floor(cw*dpr);canvas.height=Math.floor(ch*dpr);
+    out.setTransform(dpr,0,0,dpr,0,0);
+    // The composition grows to fill tall screens and remains centered on wide screens.
+    scale=Math.min((cw-(cw<700?8:100))/W,(ch-(ch<700?65:36))/H)*1.08;
+    if(cw<700)scale=Math.min((cw+125)/W,(ch-65)/H)*1.10;
+    ox=cw/2-W*scale/2; oy=ch/2-H*scale/2 + (cw<700?19:5);
+  }
+  window.addEventListener('resize',sizeCanvas,{passive:true});sizeCanvas();
+
+  function paintStem(f,t){
+    const p=smooth(.1+(f.i%7)*.14,2.7+(f.i%5)*.15,t);
+    if(p<.005)return;
+    const num=30, base=f.stemBase;
+    s.save();s.lineCap='round';s.lineJoin='round';
+    for(const [width,color,alpha] of [[12,'#112717',.93],[7.2,'#386e39',.94],[2.7,'#7fa65d',.85]]){
+      s.beginPath();s.moveTo(base.x,base.y);
+      for(let k=1;k<=num;k++){
+        const q=p*k/num;
+        let xx=bez(base.x,f.cp1.x,f.cp2.x,f.x,q);
+        let yy=bez(base.y,f.cp1.y,f.cp2.y,f.y,q);
+        xx+=Math.sin(t*.5+f.seed+q*3.8)*(motion?3:0)*q;
+        s.lineTo(xx,yy);
+      }
+      s.lineWidth=width;s.globalAlpha=alpha;s.strokeStyle=color;s.stroke();
+    }
+    s.restore();
+    // Paired leaves attach to the curved stems rather than floating behind flowers.
+    [0.21,0.39,0.57,0.74].forEach((q,j)=>{
+      const growth=smooth(.38+(f.i%6)*.12+q*2,3.55+(f.i%6)*.11+q*1.2,t);
+      if(growth<.01||p<q-.02)return;
+      const x=bez(base.x,f.cp1.x,f.cp2.x,f.x,q);
+      const y=bez(base.y,f.cp1.y,f.cp2.y,f.y,q);
+      const dir=((f.i+j)%2===0?1:-1),len=(66+(f.i*17+j*7)%62)*growth;
+      const sway=motion?Math.sin(t*.7+j*.7+f.seed)*.05:0;
+      s.save();s.translate(x,y);s.rotate((dir===1?-.27:Math.PI+.27)+sway);
+      const grd=s.createLinearGradient(0,0,len,0);
+      grd.addColorStop(0,'#15341e');grd.addColorStop(.40,'#4e984f');grd.addColorStop(.72,'#78b05e');grd.addColorStop(1,'#34652d');
+      s.beginPath();s.moveTo(0,0);
+      s.bezierCurveTo(len*.32,-len*.17,len*.65,-len*.21,len,0);
+      s.bezierCurveTo(len*.60,len*.12,len*.22,len*.19,0,0);
+      s.fillStyle=grd;s.globalAlpha=.92;s.fill();
+      s.beginPath();s.moveTo(0,0);s.quadraticCurveTo(len*.48,-len*.028,len*.93,0);
+      s.strokeStyle='#a1ba70';s.lineWidth=1.8;s.globalAlpha=.45;s.stroke();s.restore();
+    });
+  }
+
+  function drawPetal(f,j,len,width,progress,t){
+    const cols=palettes[f.kind];
+    const spread=(j/6)*Math.PI*2 + f.tilt + (j%2===0?.01:-.12);
+    const alive=motion?Math.sin(t*.81+f.seed+j*.68)*.025:0;
+    const open=progress*(.98+.02*Math.sin(t*.54+f.seed));
+    const angle=spread+(1-open)*(.4*Math.sin(j*3.3)) + alive;
+    s.save();s.rotate(angle);
+    s.scale(Math.max(.01,open),.78+open*.22);
+    const grad=s.createLinearGradient(0,0,len,0);
+    grad.addColorStop(0,cols[0]);grad.addColorStop(.15,cols[1]);
+    grad.addColorStop(.58,cols[2]);grad.addColorStop(.82,cols[3]);grad.addColorStop(1,cols[4]);
+    s.beginPath();s.moveTo(-11,0);
+    s.bezierCurveTo(len*.18,-width*.37,len*.42,-width*1.17,len*.73,-width*.53);
+    s.bezierCurveTo(len*.88,-width*.26,len*.94,-width*.10,len,0);
+    s.bezierCurveTo(len*.93,width*.10,len*.85,width*.39,len*.69,width*.56);
+    s.bezierCurveTo(len*.43,width*1.07,len*.23,width*.42,-11,0);
+    s.closePath();s.fillStyle=grad;s.globalAlpha=.97;s.fill();
+    // Hand-placed translucent seams make the color vary under the character mask.
+    s.save();s.globalCompositeOperation='screen';s.globalAlpha=.23;
+    s.beginPath();s.moveTo(len*.16,-width*.13);
+    s.bezierCurveTo(len*.44,-width*.5,len*.77,-width*.18,len*.94,0);
+    s.bezierCurveTo(len*.71,-width*.08,len*.46,width*.05,len*.16,-width*.13);
+    s.fillStyle=cols[4];s.fill();s.restore();
+    s.beginPath();s.moveTo(7,0);s.bezierCurveTo(len*.37,-width*.06,len*.73,width*.035,len*.94,0);
+    s.strokeStyle=cols[0];s.globalAlpha=.30;s.lineWidth=1.5;s.stroke();
+    for(let v=-1;v<=1;v+=2){
+      s.beginPath();s.moveTo(len*.34,v*width*.10);s.quadraticCurveTo(len*.54,v*width*.31,len*.76,v*width*.23);
+      s.strokeStyle=cols[4];s.globalAlpha=.13;s.lineWidth=1.25;s.stroke();
+    }
+    s.restore();
+  }
+
+  function paintFlower(f,t){
+    const bloom=smooth(f.start,f.start+2.6,t);
+    if(bloom<=.001)return;
+    const dx=motion?Math.sin(t*.48+f.seed)*4.4:0;
+    const dy=motion?Math.sin(t*.57+f.seed*1.1)*3.4:0;
+    s.save();s.translate(f.x+dx,f.y+dy);
+    // sepals and six petals, with the smaller alternating set behind the big petals.
+    for(let j=1;j<6;j+=2){
+      const b=smooth(f.start+.06*j,f.start+1.8+.08*j,t);
+      drawPetal(f,j,f.r*(.91+Math.sin(j*3+f.seed)*.075),f.r*.40,b,t);
+    }
+    for(let j=0;j<6;j+=2){
+      const b=smooth(f.start+.12+.08*j,f.start+2.05+.08*j,t);
+      drawPetal(f,j,f.r*(1.05+Math.cos(j*2.7+f.seed)*.065),f.r*.38,b,t);
+    }
+    const middle=smooth(f.start+.8,f.start+2.2,t);
+    if(middle>.02){
+      s.globalAlpha=middle;
+      const halo=s.createRadialGradient(0,0,0,0,0,f.r*.36);
+      halo.addColorStop(0,'#533528');halo.addColorStop(.21,'#876540cf');halo.addColorStop(.65,'#9b754b44');halo.addColorStop(1,'#00000000');
+      s.fillStyle=halo;s.beginPath();s.arc(0,0,f.r*.36,0,Math.PI*2);s.fill();
+      for(let k=0;k<9;k++){
+        const a=k*Math.PI*2/9+f.seed*.32;
+        const length=f.r*(.18+(k%3)*.037);
+        s.beginPath();s.moveTo(0,0);s.quadraticCurveTo(Math.cos(a+.14)*length*.45,Math.sin(a+.14)*length*.45,Math.cos(a)*length,Math.sin(a)*length);
+        s.strokeStyle='#5b4226';s.lineWidth=3.2;s.globalAlpha=middle*.86;s.stroke();
+        s.beginPath();s.ellipse(Math.cos(a)*length,Math.sin(a)*length,5.8,2.7,a,0,Math.PI*2);
+        s.fillStyle=k%2?'#b28b47':'#d5a45b';s.fill();
+      }
+      s.fillStyle='#553822';s.beginPath();s.arc(0,0,f.r*.075,0,Math.PI*2);s.fill();
+      for(let n=0;n<18;n++){
+        const a=n*2.4;const r=(n%5)*f.r*.015;
+        s.fillStyle=n%2?'#8b5933':'#b38c53';s.beginPath();s.arc(Math.cos(a)*r,Math.sin(a)*r,1.9+(n%3)*.4,0,Math.PI*2);s.fill();
+      }
+    }
+    s.restore();
+  }
+
+  function renderPlant(t){
+    s.clearRect(0,0,W,H);
+    for(const f of flowers)paintStem(f,t);
+    for(const f of flowers)paintFlower(f,t);
+    // A few tendrils at the tied stems are intentionally thin.
+    const show=smooth(1.4,3.4,t);
+    if(show>.01){
+      s.save();s.globalAlpha=show*.68;s.strokeStyle='#7ba866';s.lineWidth=2.7;s.lineCap='round';
+      for(let k=0;k<8;k++){
+        const x=450+k*7, y=1097;
+        s.beginPath();s.moveTo(x,y);s.quadraticCurveTo(x+Math.sin(k*8)*22,1035-k*3,x+(k-4)*25,966-k*13);s.stroke();
+      }
+      s.restore();
+    }
+  }
+
+  // Color output of the J A E N I character filter is sampled from vector petals.
+  function paintAscii(t){
+    out.setTransform(dpr,0,0,dpr,0,0);
+    out.fillStyle='#000000';out.fillRect(0,0,cw,ch);
+    const frame=s.getImageData(0,0,W,H).data;
+    const step=letterSize;
+    const xStep=step*.82, yStep=step*1.05;
+    const fontPx=step*1.28;
+    out.font=`600 ${fontPx}px "Courier New", "Liberation Mono", monospace`;
+    out.textBaseline='middle';out.textAlign='center';
+    const startX=Math.max(0,ox),endX=Math.min(cw,ox+W*scale);
+    const startY=Math.max(0,oy),endY=Math.min(ch,oy+H*scale);
+    let prevColor='';
+    const T=(motion?1:0), glyphs='JAENI';
+    for(let y=startY;y<endY;y+=yStep){
+      const sy=((y-oy)/scale)|0;if(sy<0||sy>=H)continue;
+      for(let x=startX;x<endX;x+=xStep){
+        const sx=((x-ox)/scale)|0;if(sx<0||sx>=W)continue;
+        const p=(sy*W+sx)*4,alpha=frame[p+3];
+        if(alpha<75)continue;
+        const r=frame[p],g=frame[p+1],b=frame[p+2];
+        // Choose glyph by surface brightness + stable spatial variation. All five
+        // characters recur throughout every flower, rather than spelling words.
+        const lum=(.26*r+.64*g+.10*b)/255;
+        const noise=Math.sin(sx*.24+sy*.37)*.12+Math.cos(sy*.21-sx*.16)*.10;
+        const index=Math.min(4,Math.max(0,Math.floor((lum*.69+.33+noise)*4.7)));
+        const character=glyphs[(index+((sx/17+sy/19)|0))%5];
+        const w=T*Math.sin(t*.93+sy*.030+sx*.009)*.76;
+        const yy=T*Math.sin(t*.69+sx*.021+sy*.013)*.49;
+        const opacity=clamp((alpha/255)*(.78+lum*.27),0,1);
+        // Slightly muted dusty palette like the CRT-stroked reference photograph.
+        const c=`rgba(${Math.min(255,(r*1.02+8)|0)},${Math.min(255,(g*1.03+6)|0)},${Math.min(255,(b*.99+7)|0)},${opacity.toFixed(2)})`;
+        if(c!==prevColor){out.fillStyle=c;prevColor=c;}
+        out.fillText(character,x+w,y+yy);
+      }
+    }
+
+  }
+
+  function draw(now){
+    requestAnimationFrame(draw);
+    const desired=motion?1000/24:1000/15;
+    if(now-lastRendered<desired && lastRendered!==0)return;
+    lastRendered=now;
+    const t=freeze?pausedAge:((now-origin)/1000+preview);
+    renderPlant(t);
+    paintAscii(t);
+  }
+  requestAnimationFrame(draw);
+
+  glyphSize.addEventListener('input',e=>{letterSize=Number(e.target.value);});
+  document.getElementById('replayButton').addEventListener('click',()=>{
+    origin=performance.now();pausedAge=0;freeze=false;lastRendered=0;
+  });
+  window.addEventListener('keydown',e=>{
+    if(e.key.toLowerCase()==='r' && !e.repeat)document.getElementById('replayButton').click();
+  });
+})();
+</script>
+</body>
+</html>
